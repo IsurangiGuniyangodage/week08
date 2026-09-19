@@ -36,7 +36,6 @@ jobs:
       - name: Wait for staging frontend IP
         run: |
           for i in {1..30}; do
-
             FRONTEND_IP=$(kubectl get service frontend \
               -n staging \
               -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
@@ -47,7 +46,6 @@ jobs:
             fi
 
             echo "Waiting for staging frontend IP..."
-
             sleep 10
           done
 
@@ -61,3 +59,17 @@ jobs:
             --retry 10 \
             --retry-delay 5 \
             http://${{ env.FRONTEND_IP }}
+
+  deploy-production:
+    name: Deploy Tested Release to Production
+    needs:
+      - smoke-test
+
+    if: ${{ needs.smoke-test.result == 'success' }}
+
+    uses: ./.github/workflows/04-deploy-production.yml
+
+    with:
+      image_tag: ${{ github.event.workflow_run.head_sha }}
+
+    secrets: inherit
