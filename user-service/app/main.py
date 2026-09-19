@@ -140,3 +140,5 @@ def health_check() -> dict[str, str]:
         "service": "user-service",
     }
 # Week 08 CI trigger
+
+# GitHub Actions enabled - CI trigger
