@@ -1,0 +1,72 @@
+# Prometheus and Grafana configuration for the Week08 AKS cluster.
+
+grafana:
+  enabled: true
+
+  admin:
+    existingSecret: monitoring-grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+
+  service:
+    type: ClusterIP
+
+  defaultDashboardsEnabled: true
+
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: monitoring
+
+prometheus:
+  prometheusSpec:
+    retention: 24h
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 1Gi
+
+    additionalScrapeConfigs:
+      - job_name: koalatech-http
+        metrics_path: /probe
+
+        params:
+          module:
+            - http_2xx
+
+        static_configs:
+          - targets:
+              - http://frontend.staging.svc.cluster.local
+            labels:
+              environment: staging
+              service: frontend
+
+        relabel_configs:
+          - source_labels: [__address__]
+            target_label: __param_target
+
+          - source_labels: [__param_target]
+            target_label: instance
+
+          - target_label: __address__
+            replacement: blackbox-exporter.monitoring.svc.cluster.local:9115
+
+# These control-plane endpoints are not exposed by managed AKS.
+kubeControllerManager:
+  enabled: false
+
+kubeScheduler:
+  enabled: false
+
+kubeEtcd:
+  enabled: false
+
+kubeProxy:
+  enabled: false

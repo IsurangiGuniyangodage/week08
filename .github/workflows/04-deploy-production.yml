@@ -15,28 +15,55 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production-week08
+  cancel-in-progress: false
+
 jobs:
   deploy-production:
     name: Deploy to Production
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     environment:
       name: production
 
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+      AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+      AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+
     steps:
-      - name: Checkout repository
+      - name: Validate image tag
+        run: |
+          if [[ ! "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "image_tag must be a full Git commit SHA."
+            exit 1
+          fi
+
+      - name: Checkout tested commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.image_tag }}
 
       - name: Login to Azure
-        uses: azure/login@v3
+        uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Get AKS credentials
         run: |
           az aks get-credentials \
-            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
-            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --resource-group "$AKS_RESOURCE_GROUP" \
+            --name "$AKS_CLUSTER_NAME" \
             --overwrite-existing
 
       - name: Create production namespace
@@ -45,108 +72,96 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
-      - name: Create PostgreSQL secret
+      - name: Create application and database secrets
+        env:
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+          DEFAULT_ADMIN_USERNAME: ${{ secrets.DEFAULT_ADMIN_USERNAME }}
+          DEFAULT_ADMIN_EMAIL: ${{ secrets.DEFAULT_ADMIN_EMAIL }}
+          DEFAULT_ADMIN_PASSWORD: ${{ secrets.DEFAULT_ADMIN_PASSWORD }}
         run: |
+          for name in POSTGRES_USER POSTGRES_PASSWORD JWT_SECRET_KEY \
+            DEFAULT_ADMIN_USERNAME DEFAULT_ADMIN_EMAIL DEFAULT_ADMIN_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "Missing GitHub secret: $name"
+              exit 1
+            fi
+          done
+
+          STORAGE_CONNECTION_STRING=$(az storage account show-connection-string \
+            --resource-group "$AKS_RESOURCE_GROUP" \
+            --name ishuaraw08sa9381 \
+            --query connectionString \
+            -o tsv)
+
+          if [ -z "$STORAGE_CONNECTION_STRING" ]; then
+            echo "Unable to obtain the storage connection string."
+            exit 1
+          fi
+
+          echo "::add-mask::$STORAGE_CONNECTION_STRING"
+
           kubectl create secret generic postgres-secret \
             --namespace production \
-            --from-literal=POSTGRES_USER="${{ secrets.POSTGRES_USER }}" \
-            --from-literal=POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" \
+            --from-literal=POSTGRES_USER="$POSTGRES_USER" \
+            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
-      - name: Create application secret
-        run: |
           kubectl create secret generic application-secret \
             --namespace production \
-            --from-literal=POSTGRES_USER="${{ secrets.POSTGRES_USER }}" \
-            --from-literal=POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" \
-            --from-literal=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
-            --from-literal=DEFAULT_ADMIN_USERNAME="${{ secrets.DEFAULT_ADMIN_USERNAME }}" \
-            --from-literal=DEFAULT_ADMIN_EMAIL="${{ secrets.DEFAULT_ADMIN_EMAIL }}" \
-            --from-literal=DEFAULT_ADMIN_PASSWORD="${{ secrets.DEFAULT_ADMIN_PASSWORD }}" \
-            --from-literal=AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+            --from-literal=POSTGRES_USER="$POSTGRES_USER" \
+            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+            --from-literal=JWT_SECRET_KEY="$JWT_SECRET_KEY" \
+            --from-literal=DEFAULT_ADMIN_USERNAME="$DEFAULT_ADMIN_USERNAME" \
+            --from-literal=DEFAULT_ADMIN_EMAIL="$DEFAULT_ADMIN_EMAIL" \
+            --from-literal=DEFAULT_ADMIN_PASSWORD="$DEFAULT_ADMIN_PASSWORD" \
+            --from-literal=AZURE_STORAGE_CONNECTION_STRING="$STORAGE_CONNECTION_STRING" \
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
-      - name: Apply Kubernetes manifests
+      - name: Apply production manifests with tested images
         run: |
-          kubectl apply \
-            -f kubernetes/production/
+          mkdir -p "$RUNNER_TEMP/production-manifests"
 
-      - name: Update frontend image
-        run: |
-          kubectl set image deployment/frontend \
-            frontend=${{ vars.ACR_LOGIN_SERVER }}/koalatech-frontend:${{ inputs.image_tag }} \
-            -n production
+          for manifest in kubernetes/production/*.yaml; do
+            cp "$manifest" "$RUNNER_TEMP/production-manifests/"
+          done
 
-      - name: Update user-service image
-        run: |
-          kubectl set image deployment/user-service \
-            user-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-user-service:${{ inputs.image_tag }} \
-            -n production
+          for service in frontend user-service student-service lecturer-service \
+            course-service enrollment-service; do
+            manifest=$(find "$RUNNER_TEMP/production-manifests" \
+              -name "*-${service}.yaml" -print -quit)
 
-      - name: Update student-service image
-        run: |
-          kubectl set image deployment/student-service \
-            student-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-student-service:${{ inputs.image_tag }} \
-            -n production
+            test -n "$manifest"
 
-      - name: Update lecturer-service image
-        run: |
-          kubectl set image deployment/lecturer-service \
-            lecturer-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-lecturer-service:${{ inputs.image_tag }} \
-            -n production
+            sed -i \
+              "s|image: placeholder|image: ${ACR_LOGIN_SERVER}/koalatech-${service}:${IMAGE_TAG}|g" \
+              "$manifest"
+          done
 
-      - name: Update course-service image
-        run: |
-          kubectl set image deployment/course-service \
-            course-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-course-service:${{ inputs.image_tag }} \
-            -n production
+          kubectl apply -f "$RUNNER_TEMP/production-manifests/"
 
-      - name: Update enrollment-service image
+      - name: Wait for production rollouts
         run: |
-          kubectl set image deployment/enrollment-service \
-            enrollment-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-enrollment-service:${{ inputs.image_tag }} \
-            -n production
-
-      - name: Wait for frontend rollout
-        run: |
-          kubectl rollout status deployment/frontend \
-            -n production \
-            --timeout=300s
-
-      - name: Wait for user-service rollout
-        run: |
-          kubectl rollout status deployment/user-service \
-            -n production \
-            --timeout=300s
-
-      - name: Wait for student-service rollout
-        run: |
-          kubectl rollout status deployment/student-service \
-            -n production \
-            --timeout=300s
-
-      - name: Wait for lecturer-service rollout
-        run: |
-          kubectl rollout status deployment/lecturer-service \
-            -n production \
-            --timeout=300s
-
-      - name: Wait for course-service rollout
-        run: |
-          kubectl rollout status deployment/course-service \
-            -n production \
-            --timeout=300s
-
-      - name: Wait for enrollment-service rollout
-        run: |
-          kubectl rollout status deployment/enrollment-service \
-            -n production \
-            --timeout=300s
+          for service in frontend user-service student-service lecturer-service \
+            course-service enrollment-service; do
+            kubectl rollout status deployment/"$service" \
+              --namespace production \
+              --timeout=600s
+          done
 
       - name: Show production resources
         run: |
-          kubectl get pods -n production
-          kubectl get services -n production
-          kubectl get pvc -n production
+          kubectl get pods --namespace production
+          kubectl get services --namespace production
+          kubectl get pvc --namespace production
+
+      - name: Add production summary
+        run: |
+          {
+            echo "### Production deployment"
+            echo "- Deployed tested image tag: $IMAGE_TAG"
+            echo "- All six application deployments rolled out successfully."
+          } >> "$GITHUB_STEP_SUMMARY"

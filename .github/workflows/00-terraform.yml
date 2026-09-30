@@ -1,0 +1,88 @@
+name: 00 - Terraform Infrastructure
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-week08
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    name: Provision Azure Infrastructure
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    defaults:
+      run:
+        working-directory: terraform
+        shell: bash
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+      ARM_CLIENT_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientId }}
+      ARM_CLIENT_SECRET: ${{ fromJSON(secrets.AZURE_CREDENTIALS).clientSecret }}
+      ARM_TENANT_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).tenantId }}
+      ARM_SUBSCRIPTION_ID: ${{ fromJSON(secrets.AZURE_CREDENTIALS).subscriptionId }}
+
+      ARM_RESOURCE_PROVIDER_REGISTRATIONS: "none"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive
+
+      - name: Initialise Terraform with remote state
+        run: terraform init -input=false -lockfile=readonly
+
+      - name: Validate Terraform configuration
+        run: terraform validate
+
+      - name: Plan infrastructure changes
+        run: terraform plan -input=false -lock-timeout=5m -out=pipeline.tfplan
+
+      - name: Apply infrastructure changes
+        run: terraform apply -input=false -lock-timeout=5m pipeline.tfplan
+
+      - name: Verify AKS and ACR provisioning
+        run: |
+          az aks show \
+            --resource-group "$(terraform output -raw resource_group_name)" \
+            --name "$(terraform output -raw aks_cluster_name)" \
+            --query "{Name:name,Status:provisioningState}" \
+            -o table
+
+          az acr show \
+            --name "$(terraform output -raw acr_name)" \
+            --query "{Name:name,Status:provisioningState}" \
+            -o table
+
+      - name: Add workflow summary
+        run: |
+          {
+            echo "### Terraform infrastructure"
+            echo "Terraform validation, planning and apply completed successfully."
+            echo ""
+            echo "- Resource group: $(terraform output -raw resource_group_name)"
+            echo "- AKS cluster: $(terraform output -raw aks_cluster_name)"
+            echo "- ACR: $(terraform output -raw acr_name)"
+            echo "- State backend: Azure Blob Storage"
+          } >> "$GITHUB_STEP_SUMMARY"

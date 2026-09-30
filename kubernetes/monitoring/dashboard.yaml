@@ -1,0 +1,156 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: koalatech-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  koalatech-overview.json: |
+    {
+      "uid": "koalatech-overview",
+      "title": "KoalaTech Application and AKS Overview",
+      "tags": ["koalatech", "aks", "staging"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "refresh": "30s",
+      "time": {
+        "from": "now-30m",
+        "to": "now"
+      },
+      "panels": [
+        {
+          "id": 1,
+          "title": "Frontend HTTP Availability",
+          "description": "1 means the latest HTTP probe succeeded; 0 means it failed.",
+          "type": "stat",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "probe_success{job=\"koalatech-http\",service=\"frontend\"}",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 1,
+              "unit": "percentunit",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {"color": "red", "value": null},
+                  {"color": "green", "value": 1}
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "background",
+            "reduceOptions": {"calcs": ["lastNotNull"]}
+          }
+        },
+        {
+          "id": 2,
+          "title": "Ready AKS Nodes",
+          "type": "stat",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\",status=\"true\"})",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"unit": "short", "decimals": 0},
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"]}
+          }
+        },
+        {
+          "id": 3,
+          "title": "Running Staging Pods",
+          "type": "stat",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(kube_pod_status_phase{namespace=\"staging\",phase=\"Running\"})",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"unit": "short", "decimals": 0},
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {"calcs": ["lastNotNull"]}
+          }
+        },
+        {
+          "id": 4,
+          "title": "Frontend HTTP Probe Duration",
+          "description": "Total duration of the synthetic HTTP probe in milliseconds.",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 5},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "probe_duration_seconds{job=\"koalatech-http\",service=\"frontend\"} * 1000",
+              "legendFormat": "Frontend"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"unit": "ms", "min": 0},
+            "overrides": []
+          }
+        },
+        {
+          "id": 5,
+          "title": "Staging CPU Usage by Pod",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"staging\",container!=\"\",container!=\"POD\",image!=\"\"}[5m]))",
+              "legendFormat": "{{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"unit": "cores", "min": 0},
+            "overrides": []
+          }
+        },
+        {
+          "id": 6,
+          "title": "Staging Memory Usage by Pod",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"staging\",container!=\"\",container!=\"POD\",image!=\"\"})",
+              "legendFormat": "{{pod}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"unit": "bytes", "min": 0},
+            "overrides": []
+          }
+        }
+      ]
+    }
