@@ -11,9 +11,10 @@ on:
 
   workflow_dispatch:
 
+permissions:
+  contents: read
 
 jobs:
-
   # =========================================================
   # Backend Tests
   # =========================================================
@@ -23,7 +24,6 @@ jobs:
 
     strategy:
       fail-fast: false
-
       matrix:
         include:
           - service: user-service
@@ -83,7 +83,6 @@ jobs:
       AZURE_STORAGE_CONTAINER_NAME: ""
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -100,27 +99,36 @@ jobs:
 
       - name: Run tests
         working-directory: ${{ matrix.service }}
-        run: |
-          pytest -v
-
+        run: pytest -v
 
   # =========================================================
-  # Build and Push Docker Images
+  # Terraform Infrastructure
   # =========================================================
-  build-and-push:
-    name: Build and Push ${{ matrix.image }}
-    runs-on: ubuntu-latest
-
-    # All backend tests must pass before this job starts
+  terraform-infrastructure:
+    name: Terraform Infrastructure
     needs:
       - backend-test
 
-    # Build and push when code is pushed to main or manually triggered
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+    uses: ./.github/workflows/00-terraform.yml
+    secrets: inherit
+
+  # =========================================================
+  # Build, Scan and Push Docker Images
+  # =========================================================
+  build-and-push:
+    name: Build, Scan and Push ${{ matrix.image }}
+    runs-on: ubuntu-latest
+
+    needs:
+      - backend-test
+      - terraform-infrastructure
+
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
     strategy:
       fail-fast: false
-
       matrix:
         include:
           - service: frontend
@@ -142,7 +150,6 @@ jobs:
             image: koalatech-enrollment-service
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -161,6 +168,27 @@ jobs:
             --platform linux/amd64 \
             -t ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }} \
             ./${{ matrix.service }}
+
+      - name: Docker Scout vulnerability scan
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: local://${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          summary: true
+          write-comment: false
+          exit-code: false
+
+      - name: Docker Scout remediation recommendations
+        uses: docker/scout-action@v1
+        with:
+          command: recommendations
+          image: local://${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          summary: true
+          write-comment: false
 
       - name: Push Docker image with commit SHA
         run: |

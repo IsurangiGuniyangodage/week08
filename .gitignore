@@ -197,3 +197,12 @@ cython_debug/
 .cursorindexingignore
 
 node_modules/
+# Terraform local files and sensitive outputs
+**/.terraform/
+*.tfstate*
+*.tfplan
+crash.log
+crash.*.log
+/kubernetes/07-application-secret.yaml
+/student-service/.env
+/lecturer-service/.env
