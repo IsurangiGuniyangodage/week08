@@ -9,16 +9,33 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-staging-week08
+  cancel-in-progress: false
+
 jobs:
   deploy-staging:
     name: Deploy to Staging
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
-    if: >
-      ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: github.event.workflow_run.conclusion == 'success'
 
     environment:
       name: staging
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+      AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+      AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
 
     steps:
       - name: Checkout tested commit
@@ -27,15 +44,15 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Login to Azure
-        uses: azure/login@v3
+        uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Get AKS credentials
         run: |
           az aks get-credentials \
-            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
-            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --resource-group "$AKS_RESOURCE_GROUP" \
+            --name "$AKS_CLUSTER_NAME" \
             --overwrite-existing
 
       - name: Create staging namespace
@@ -44,108 +61,203 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
-      - name: Create PostgreSQL secret
+      - name: Create application and database secrets
+        env:
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+          DEFAULT_ADMIN_USERNAME: ${{ secrets.DEFAULT_ADMIN_USERNAME }}
+          DEFAULT_ADMIN_EMAIL: ${{ secrets.DEFAULT_ADMIN_EMAIL }}
+          DEFAULT_ADMIN_PASSWORD: ${{ secrets.DEFAULT_ADMIN_PASSWORD }}
         run: |
+          for name in POSTGRES_USER POSTGRES_PASSWORD JWT_SECRET_KEY \
+            DEFAULT_ADMIN_USERNAME DEFAULT_ADMIN_EMAIL DEFAULT_ADMIN_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "Missing GitHub secret: $name"
+              exit 1
+            fi
+          done
+
+          STORAGE_CONNECTION_STRING=$(az storage account show-connection-string \
+            --resource-group "$AKS_RESOURCE_GROUP" \
+            --name ishuaraw08sa9381 \
+            --query connectionString \
+            -o tsv)
+
+          if [ -z "$STORAGE_CONNECTION_STRING" ]; then
+            echo "Unable to obtain the storage connection string."
+            exit 1
+          fi
+
+          echo "::add-mask::$STORAGE_CONNECTION_STRING"
+
           kubectl create secret generic postgres-secret \
             --namespace staging \
-            --from-literal=POSTGRES_USER="${{ secrets.POSTGRES_USER }}" \
-            --from-literal=POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" \
+            --from-literal=POSTGRES_USER="$POSTGRES_USER" \
+            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
-      - name: Create application secret
-        run: |
           kubectl create secret generic application-secret \
             --namespace staging \
-            --from-literal=POSTGRES_USER="${{ secrets.POSTGRES_USER }}" \
-            --from-literal=POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" \
-            --from-literal=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
-            --from-literal=DEFAULT_ADMIN_USERNAME="${{ secrets.DEFAULT_ADMIN_USERNAME }}" \
-            --from-literal=DEFAULT_ADMIN_EMAIL="${{ secrets.DEFAULT_ADMIN_EMAIL }}" \
-            --from-literal=DEFAULT_ADMIN_PASSWORD="${{ secrets.DEFAULT_ADMIN_PASSWORD }}" \
-            --from-literal=AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+            --from-literal=POSTGRES_USER="$POSTGRES_USER" \
+            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+            --from-literal=JWT_SECRET_KEY="$JWT_SECRET_KEY" \
+            --from-literal=DEFAULT_ADMIN_USERNAME="$DEFAULT_ADMIN_USERNAME" \
+            --from-literal=DEFAULT_ADMIN_EMAIL="$DEFAULT_ADMIN_EMAIL" \
+            --from-literal=DEFAULT_ADMIN_PASSWORD="$DEFAULT_ADMIN_PASSWORD" \
+            --from-literal=AZURE_STORAGE_CONNECTION_STRING="$STORAGE_CONNECTION_STRING" \
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
-      - name: Apply Kubernetes manifests
+      - name: Apply staging manifests with tested images
         run: |
-          kubectl apply \
-            -f kubernetes/staging/
+          mkdir -p "$RUNNER_TEMP/staging-manifests"
 
-      - name: Update frontend image
-        run: |
-          kubectl set image deployment/frontend \
-            frontend=${{ vars.ACR_LOGIN_SERVER }}/koalatech-frontend:${{ github.event.workflow_run.head_sha }} \
-            -n staging
+          for manifest in kubernetes/staging/*.yaml; do
+            cp "$manifest" "$RUNNER_TEMP/staging-manifests/"
+          done
 
-      - name: Update user-service image
-        run: |
-          kubectl set image deployment/user-service \
-            user-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-user-service:${{ github.event.workflow_run.head_sha }} \
-            -n staging
+          for service in frontend user-service student-service lecturer-service \
+            course-service enrollment-service; do
+            manifest=$(find "$RUNNER_TEMP/staging-manifests" \
+              -name "*-${service}.yaml" -print -quit)
 
-      - name: Update student-service image
-        run: |
-          kubectl set image deployment/student-service \
-            student-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-student-service:${{ github.event.workflow_run.head_sha }} \
-            -n staging
+            test -n "$manifest"
 
-      - name: Update lecturer-service image
-        run: |
-          kubectl set image deployment/lecturer-service \
-            lecturer-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-lecturer-service:${{ github.event.workflow_run.head_sha }} \
-            -n staging
+            sed -i \
+              "s|image: placeholder|image: ${ACR_LOGIN_SERVER}/koalatech-${service}:${IMAGE_TAG}|g" \
+              "$manifest"
+          done
 
-      - name: Update course-service image
-        run: |
-          kubectl set image deployment/course-service \
-            course-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-course-service:${{ github.event.workflow_run.head_sha }} \
-            -n staging
+          kubectl apply -f "$RUNNER_TEMP/staging-manifests/"
 
-      - name: Update enrollment-service image
+      - name: Wait for staging rollouts
         run: |
-          kubectl set image deployment/enrollment-service \
-            enrollment-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-enrollment-service:${{ github.event.workflow_run.head_sha }} \
-            -n staging
+          for service in frontend user-service student-service lecturer-service \
+            course-service enrollment-service; do
+            kubectl rollout status deployment/"$service" \
+              --namespace staging \
+              --timeout=600s
+          done
 
-      - name: Wait for frontend rollout
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Create monitoring namespace and Grafana credentials
         run: |
-          kubectl rollout status deployment/frontend \
-            -n staging \
+          kubectl create namespace monitoring \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+          if ! kubectl get secret monitoring-grafana-admin \
+            --namespace monitoring >/dev/null 2>&1; then
+
+            GRAFANA_PASSWORD=$(openssl rand -hex 24)
+            echo "::add-mask::$GRAFANA_PASSWORD"
+
+            kubectl create secret generic monitoring-grafana-admin \
+              --namespace monitoring \
+              --from-literal=admin-user=admin \
+              --from-literal=admin-password="$GRAFANA_PASSWORD"
+          fi
+
+      - name: Deploy HTTP exporter and Grafana dashboard
+        run: |
+          kubectl apply -f kubernetes/monitoring/blackbox-exporter.yaml
+          kubectl apply -f kubernetes/monitoring/dashboard.yaml
+
+          kubectl rollout status deployment/blackbox-exporter \
+            --namespace monitoring \
             --timeout=300s
 
-      - name: Wait for user-service rollout
+      - name: Install Prometheus and Grafana
         run: |
-          kubectl rollout status deployment/user-service \
-            -n staging \
-            --timeout=300s
+          helm repo add prometheus-community \
+            https://prometheus-community.github.io/helm-charts
 
-      - name: Wait for student-service rollout
-        run: |
-          kubectl rollout status deployment/student-service \
-            -n staging \
-            --timeout=300s
+          helm repo update
 
-      - name: Wait for lecturer-service rollout
-        run: |
-          kubectl rollout status deployment/lecturer-service \
-            -n staging \
-            --timeout=300s
+          helm upgrade --install monitoring \
+            prometheus-community/kube-prometheus-stack \
+            --version 91.8.1 \
+            --namespace monitoring \
+            --values kubernetes/monitoring/values.yaml \
+            --wait \
+            --timeout 15m
 
-      - name: Wait for course-service rollout
+      - name: Verify application and infrastructure metrics
         run: |
-          kubectl rollout status deployment/course-service \
-            -n staging \
-            --timeout=300s
+          PROMETHEUS_NAME=$(kubectl get prometheus \
+            --namespace monitoring \
+            -o jsonpath='{.items[0].metadata.name}')
 
-      - name: Wait for enrollment-service rollout
-        run: |
-          kubectl rollout status deployment/enrollment-service \
-            -n staging \
-            --timeout=300s
+          PROMETHEUS_POD=$(kubectl get pods \
+            --namespace monitoring \
+            --selector="prometheus=$PROMETHEUS_NAME" \
+            -o jsonpath='{.items[0].metadata.name}')
 
-      - name: Show staging resources
+          test -n "$PROMETHEUS_POD"
+
+          kubectl port-forward \
+            --namespace monitoring \
+            pod/"$PROMETHEUS_POD" 9090:9090 \
+            >"$RUNNER_TEMP/prometheus-port-forward.log" 2>&1 &
+
+          FORWARD_PID=$!
+          trap 'kill "$FORWARD_PID" 2>/dev/null || true' EXIT
+
+          check_metric() {
+            local query="$1"
+            local label="$2"
+
+            for attempt in {1..30}; do
+              if response=$(curl --silent --show-error --fail \
+                --max-time 10 \
+                --get \
+                --data-urlencode "query=$query" \
+                http://127.0.0.1:9090/api/v1/query); then
+
+                if jq -e \
+                  '.status == "success" and
+                   any(.data.result[]; (.value[1] | tonumber) > 0)' \
+                  <<< "$response" >/dev/null; then
+
+                  echo "$label verified."
+                  return 0
+                fi
+              fi
+
+              echo "Waiting for $label..."
+              sleep 10
+            done
+
+            echo "No successful metric result for $label."
+            return 1
+          }
+
+          check_metric \
+            'probe_success{job="koalatech-http",service="frontend"}' \
+            "Frontend HTTP availability"
+
+          check_metric \
+            'kube_node_status_condition{condition="Ready",status="true"}' \
+            "AKS node readiness"
+
+      - name: Show deployed resources
         run: |
-          kubectl get pods -n staging
-          kubectl get services -n staging
-          kubectl get pvc -n staging
+          kubectl get pods,services,pvc --namespace staging
+          kubectl get pods,services --namespace monitoring
+          helm list --namespace monitoring
+
+      - name: Add deployment summary
+        run: |
+          {
+            echo "### Staging deployment and monitoring"
+            echo "- Deployed image tag: $IMAGE_TAG"
+            echo "- Application rollouts completed successfully."
+            echo "- Prometheus and Grafana installed through Helm."
+            echo "- Frontend HTTP availability metric verified."
+            echo "- AKS node readiness metric verified."
+            echo "- Dashboard: KoalaTech Application and AKS Overview"
+          } >> "$GITHUB_STEP_SUMMARY"
