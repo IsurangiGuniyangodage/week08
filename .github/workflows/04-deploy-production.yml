@@ -66,6 +66,15 @@ jobs:
             --name "$AKS_CLUSTER_NAME" \
             --overwrite-existing
 
+      # ---------------------------------------------------------
+      # Verify that the HD progressive delivery extension exists
+      # ---------------------------------------------------------
+      - name: Verify Argo Rollouts installation
+        run: |
+          kubectl get crd rollouts.argoproj.io
+          kubectl get deployment argo-rollouts \
+            --namespace argo-rollouts
+
       - name: Create production namespace
         run: |
           kubectl create namespace production \
@@ -121,6 +130,14 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
+      # The original Week 9 implementation used a Deployment for
+      # user-service. The HD extension replaces it with an Argo Rollout.
+      - name: Remove legacy user-service Deployment
+        run: |
+          kubectl delete deployment user-service \
+            --namespace production \
+            --ignore-not-found=true
+
       - name: Apply production manifests with tested images
         run: |
           mkdir -p "$RUNNER_TEMP/production-manifests"
@@ -131,6 +148,7 @@ jobs:
 
           for service in frontend user-service student-service lecturer-service \
             course-service enrollment-service; do
+
             manifest=$(find "$RUNNER_TEMP/production-manifests" \
               -name "*-${service}.yaml" -print -quit)
 
@@ -143,25 +161,91 @@ jobs:
 
           kubectl apply -f "$RUNNER_TEMP/production-manifests/"
 
-      - name: Wait for production rollouts
+      # ---------------------------------------------------------
+      # Existing Kubernetes Deployment behaviour
+      # ---------------------------------------------------------
+      - name: Wait for standard production deployments
         run: |
-          for service in frontend user-service student-service lecturer-service \
+          for service in frontend student-service lecturer-service \
             course-service enrollment-service; do
+
             kubectl rollout status deployment/"$service" \
               --namespace production \
               --timeout=600s
           done
 
-      - name: Show production resources
+      # ---------------------------------------------------------
+      # HD extension - Argo Rollouts CLI
+      # ---------------------------------------------------------
+      - name: Install Argo Rollouts CLI
         run: |
-          kubectl get pods --namespace production
-          kubectl get services --namespace production
-          kubectl get pvc --namespace production
+          curl -LO \
+            https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
+
+          chmod +x kubectl-argo-rollouts-linux-amd64
+
+          sudo mv \
+            kubectl-argo-rollouts-linux-amd64 \
+            /usr/local/bin/kubectl-argo-rollouts
+
+          kubectl argo rollouts version
+
+      # ---------------------------------------------------------
+      # HD extension - wait for Prometheus-controlled rollout
+      #
+      # Argo will progress:
+      # 20% -> Prometheus analysis -> 50%
+      # -> Prometheus analysis -> 100%
+      #
+      # A failed analysis causes the rollout to abort.
+      # ---------------------------------------------------------
+      - name: Wait for progressive user-service rollout
+        run: |
+          kubectl argo rollouts status user-service \
+            --namespace production \
+            --timeout 10m
+
+      # Run even when progressive delivery fails so that the
+      # workflow records evidence of the AnalysisRun and rollout.
+      - name: Show progressive deployment evidence
+        if: always()
+        run: |
+          echo "=== User-service Rollout ==="
+          kubectl get rollout user-service \
+            --namespace production || true
+
+          echo ""
+          echo "=== Prometheus Analysis Runs ==="
+          kubectl get analysisrun \
+            --namespace production || true
+
+          echo ""
+          echo "=== User-service ReplicaSets ==="
+          kubectl get replicaset \
+            --namespace production \
+            -l app=user-service || true
+
+          echo ""
+          echo "=== User-service Pods ==="
+          kubectl get pods \
+            --namespace production \
+            -l app=user-service \
+            -o wide || true
+
+      - name: Show production resources
+        if: always()
+        run: |
+          kubectl get pods --namespace production || true
+          kubectl get services --namespace production || true
+          kubectl get pvc --namespace production || true
 
       - name: Add production summary
+        if: success()
         run: |
           {
             echo "### Production deployment"
             echo "- Deployed tested image tag: $IMAGE_TAG"
-            echo "- All six application deployments rolled out successfully."
+            echo "- Five services used standard Kubernetes Deployments."
+            echo "- user-service used Argo Rollouts progressive canary delivery."
+            echo "- Prometheus analysis controlled automatic promotion or rejection."
           } >> "$GITHUB_STEP_SUMMARY"

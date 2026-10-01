@@ -126,7 +126,8 @@ app.include_router(users.router)
 )
 def root() -> dict[str, str]:
     return {
-        "message": "KoalaTech University User Service is running."
+        "message": "KoalaTech University User Service v2 is running.",
+        "version": "v2",
     }
 
 
@@ -138,7 +139,14 @@ def health_check() -> dict[str, str]:
     return {
         "status": "healthy",
         "service": "user-service",
+        "version": "v2",
     }
-# Week 08 CI trigger
-
-# GitHub Actions enabled - CI trigger
+@app.get(
+    "/canary-check",
+    tags=["Health"],
+)
+def canary_check() -> dict[str, str]:
+    return {
+        "status": "healthy",
+        "version": "v2",
+    }

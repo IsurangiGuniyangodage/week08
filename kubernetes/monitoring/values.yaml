@@ -1,4 +1,4 @@
-# Prometheus and Grafana configuration for the Week08 AKS cluster.
+# Prometheus and Grafana configuration for the SIT722 HD progressive delivery demo.
 
 grafana:
   enabled: true
@@ -20,11 +20,12 @@ grafana:
       labelValue: "1"
       searchNamespace: monitoring
 
+
 prometheus:
   prometheusSpec:
     retention: 24h
-    scrapeInterval: 30s
-    evaluationInterval: 30s
+    scrapeInterval: 15s
+    evaluationInterval: 15s
 
     resources:
       requests:
@@ -34,7 +35,8 @@ prometheus:
         memory: 1Gi
 
     additionalScrapeConfigs:
-      - job_name: koalatech-http
+      - job_name: koalatech-hd-canary
+
         metrics_path: /probe
 
         params:
@@ -42,11 +44,24 @@ prometheus:
             - http_2xx
 
         static_configs:
+
+          # ---------------------------------------------------------
+          # HD demonstration environment
+          # ---------------------------------------------------------
           - targets:
-              - http://frontend.staging.svc.cluster.local
+              - http://user-service-canary.hd-demo.svc.cluster.local:8000/canary-check
             labels:
-              environment: staging
-              service: frontend
+              environment: hd-demo
+              service: user-service-canary
+
+          # ---------------------------------------------------------
+          # Production progressive delivery environment
+          # ---------------------------------------------------------
+          - targets:
+              - http://user-service-canary.production.svc.cluster.local:8000/canary-check
+            labels:
+              environment: production
+              service: user-service-canary
 
         relabel_configs:
           - source_labels: [__address__]
@@ -58,7 +73,9 @@ prometheus:
           - target_label: __address__
             replacement: blackbox-exporter.monitoring.svc.cluster.local:9115
 
-# These control-plane endpoints are not exposed by managed AKS.
+
+# These AKS control-plane endpoints are managed by Azure
+# and are not directly exposed to Prometheus.
 kubeControllerManager:
   enabled: false
 
