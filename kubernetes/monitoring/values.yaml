@@ -1,4 +1,11 @@
-# Prometheus and Grafana configuration for the SIT722 HD progressive delivery demo.
+# Prometheus and Grafana configuration for SIT722.
+#
+# Existing monitoring:
+# - staging frontend HTTP availability
+# - AKS infrastructure metrics
+#
+# HD extension:
+# - Prometheus health analysis for Argo Rollouts canary deployments
 
 grafana:
   enabled: true
@@ -35,6 +42,41 @@ prometheus:
         memory: 1Gi
 
     additionalScrapeConfigs:
+
+      # =========================================================
+      # EXISTING SIT722 MONITORING
+      # Used by the staging workflow and Grafana dashboard.
+      # =========================================================
+      - job_name: koalatech-http
+
+        metrics_path: /probe
+
+        params:
+          module:
+            - http_2xx
+
+        static_configs:
+          - targets:
+              - http://frontend.staging.svc.cluster.local
+            labels:
+              environment: staging
+              service: frontend
+
+        relabel_configs:
+          - source_labels: [__address__]
+            target_label: __param_target
+
+          - source_labels: [__param_target]
+            target_label: instance
+
+          - target_label: __address__
+            replacement: blackbox-exporter.monitoring.svc.cluster.local:9115
+
+
+      # =========================================================
+      # HD EXTENSION
+      # Used by Argo Rollouts for automated canary analysis.
+      # =========================================================
       - job_name: koalatech-hd-canary
 
         metrics_path: /probe
@@ -45,18 +87,14 @@ prometheus:
 
         static_configs:
 
-          # ---------------------------------------------------------
-          # HD demonstration environment
-          # ---------------------------------------------------------
+          # Isolated HD experiment
           - targets:
               - http://user-service-canary.hd-demo.svc.cluster.local:8000/canary-check
             labels:
               environment: hd-demo
               service: user-service-canary
 
-          # ---------------------------------------------------------
-          # Production progressive delivery environment
-          # ---------------------------------------------------------
+          # Production progressive delivery
           - targets:
               - http://user-service-canary.production.svc.cluster.local:8000/canary-check
             labels:
