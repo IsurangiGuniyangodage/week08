@@ -1,39 +1,10 @@
-apiVersion: argoproj.io/v1alpha1
-kind: AnalysisTemplate
-metadata:
-  name: canary-health-check
-  namespace: production
-spec:
-  metrics:
-    - name: canary-http-success
-      initialDelay: 20s
-      interval: 20s
-      count: 3
-
-      successCondition: result[0] == 1
-      failureCondition: result[0] == 0
-      failureLimit: 1
-
-      provider:
-        prometheus:
-          address: http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
-          query: |
-            probe_success{
-              job="koalatech-hd-canary",
-              environment="production",
-              service="user-service-canary"
-            }
-
----
-apiVersion: argoproj.io/v1alpha1
-kind: Rollout
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: user-service
-  namespace: production
-
+  namespace: hd-demo
 spec:
-  replicas: 5
-  revisionHistoryLimit: 3
+  replicas: 1
 
   selector:
     matchLabels:
@@ -60,7 +31,7 @@ spec:
 
       containers:
         - name: user-service
-          image: placeholder
+          image: ishuaraweek08acr9381.azurecr.io/koalatech-user-service:v1
           imagePullPolicy: Always
 
           ports:
@@ -70,13 +41,13 @@ spec:
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
-                  name: application-secret
+                  name: hd-demo-secret
                   key: POSTGRES_USER
 
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: application-secret
+                  name: hd-demo-secret
                   key: POSTGRES_PASSWORD
 
             - name: POSTGRES_DB
@@ -91,7 +62,7 @@ spec:
             - name: JWT_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: application-secret
+                  name: hd-demo-secret
                   key: JWT_SECRET_KEY
 
             - name: JWT_ALGORITHM
@@ -103,19 +74,19 @@ spec:
             - name: DEFAULT_ADMIN_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: application-secret
+                  name: hd-demo-secret
                   key: DEFAULT_ADMIN_USERNAME
 
             - name: DEFAULT_ADMIN_EMAIL
               valueFrom:
                 secretKeyRef:
-                  name: application-secret
+                  name: hd-demo-secret
                   key: DEFAULT_ADMIN_EMAIL
 
             - name: DEFAULT_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: application-secret
+                  name: hd-demo-secret
                   key: DEFAULT_ADMIN_PASSWORD
 
           readinessProbe:
@@ -132,72 +103,18 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 10
 
-  strategy:
-    canary:
-      stableService: user-service-stable
-      canaryService: user-service-canary
-
-      maxSurge: 1
-      maxUnavailable: 0
-
-      steps:
-        - setWeight: 20
-
-        - pause:
-            duration: 30s
-
-        - analysis:
-            templates:
-              - templateName: canary-health-check
-
-        - setWeight: 50
-
-        - pause:
-            duration: 30s
-
-        - analysis:
-            templates:
-              - templateName: canary-health-check
-
-        - setWeight: 100
-
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: user-service
-  namespace: production
+  namespace: hd-demo
 spec:
-  selector:
-    app: user-service
-  ports:
-    - name: http
-      port: 8000
-      targetPort: 8000
+  type: ClusterIP
 
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: user-service-stable
-  namespace: production
-spec:
   selector:
     app: user-service
-  ports:
-    - name: http
-      port: 8000
-      targetPort: 8000
 
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: user-service-canary
-  namespace: production
-spec:
-  selector:
-    app: user-service
   ports:
     - name: http
       port: 8000

@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: canary-health-check
+  namespace: hd-demo
+
+spec:
+  metrics:
+    - name: canary-http-success
+
+      initialDelay: 20s
+      interval: 20s
+      count: 3
+
+      successCondition: result[0] == 1
+      failureCondition: result[0] == 0
+      failureLimit: 1
+
+      provider:
+        prometheus:
+          address: http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+
+          query: |
+            probe_success{
+              job="koalatech-hd-canary",
+              service="user-service-canary"
+            }
